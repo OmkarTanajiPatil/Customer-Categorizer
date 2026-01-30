@@ -2,13 +2,11 @@
 
 import os
 
-
+TARGET_COLUMN = 'cluster'
 PIPELINE_NAME: str = "src"
 ARTIFACTS_DIR: str = "artifacts"
 LOG_DIR: str = "logs"
 LOG_FILE = "customer_categorization.log"
-
-
 
 
 # COMMON FILES
@@ -20,12 +18,21 @@ MODEL_FILE_NAME: str = "model.pkl"
 SCHEMA_FILE_PATH: str = os.path.join("config", "schema.yaml")
 
 
-
 # Data Ingestion constants
-DATA_INGESTION_COLLECTION_NAME:str = ""
+DATA_INGESTION_COLLECTION_NAME: str = ""
 DATA_INGESTION_DIR_NAME: str = "data_ingestion"
 DATA_INGESTION_FEATURE_STORE_DIR: str = "feature_store"
 DATA_INGESTION_INGESTED_DIR: str = "ingested"
 DATA_INGESTION_TRAIN_TEST_SPLIT_RATIO: float = 0.2
 
-# Config 
+# Data transformation constants
+DATA_TRANSFORMATION_DIR_NAME: str = "data_transformation"
+DATA_TRANSFORMATION_TRANSFORMED_DIR: str = "transformed"
+DATA_TRANSFORMATION_TRANSFORMED_OBJECT_DIR: str = "transformed_object"
+
+# Data validation constants
+DATA_VALIDATION_DIR_NAME: str = "data_validation"
+DATA_VALIDATION_VALID_DIR: str = "validated"
+DATA_VALIDATION_INVALID_DIR: str = "invalid"
+DATA_VALIDATION_DRIFT_REPORT_DIR: str = "drift_report"
+DATA_VALIDATION_DRIFT_REPORT_FILE_NAME: str = "report.yaml"

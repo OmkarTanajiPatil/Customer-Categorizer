@@ -1,184 +1,375 @@
+import sys
 import os
 
-# Custom modules
-from src.utils.exception import CustomException
-from src.utils.logger import logging
-from src.utils.main_utils import save_df
-import sys
-from datetime import datetime
-
-# Data manipulation libraries
 import pandas as pd
+from pandas import DataFrame
 import numpy as np
 from sklearn.preprocessing import StandardScaler, PowerTransformer
-from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
 
 
-
-file_path = os.getenv("MONGO_INGESTED_DATA_LOCATION")
-
-# Importing the data
-def import_data(file_path: str) -> pd.DataFrame:
-    """
-    Import data from a PARQUET file and return it as a pandas DataFrame.
-    """
-    try:
-        df = pd.read_parquet(file_path)
-        logging.info(f"Data **imported** from {file_path} successfully.")
-        return df
-    except Exception as e:
-        logging.error(f"Error occurred while **importing** data from {file_path}: {e}")
-        raise CustomException(e, sys)
+from src.logger import logging
+from src.exception import CustomException
 
 
-"""
-Handeling null values
-Handeling duplicate values
-Removing ['Z_CostContact', 'Z_Revenue', 'ID', '_id'-> MongoId] columns
-"""
+from src.constants.training_pipeline import *  # noqa: F403
 
-def transform_data(df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        df = df.dropna()
-        df = df.drop_duplicates()
-        df = df.drop(columns=['Z_CostContact', 'Z_Revenue', 'ID', '_id'], axis=1)
-        logging.info("Data **transformed** successfully.")
-        return df
-    except Exception as e:
-        logging.error(f"Error occurred while **transforming** data: {e}")
-        raise CustomException(e, sys)
+from src.utils.main_utils import MainUtils
+from src.entity.config_entity import DataTransformationConfig, SimpleImputerConfig
+from src.entity.artifact_entity import (
+    DataIngestionArtifact,
+    DataValidationArtifact,
+    DataTransformationArtifact,
+)
+
+from src.components.data_ingestion import DataIngestion
+from src.components.data_clustering import CreateCluster
+
+from datetime import datetime
 
 
-def featureCreation_data(df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        # create new column for feature
-        ##  creating a new field to store the Age of the customer
-        df['Age']=2026 - df['Year_Birth']   
+class DataTransformation:
+    def __init__(
+        self,
+        dataIngestionArtifact: DataIngestionArtifact,
+        dataValidationArtifact: DataValidationArtifact,
+        dataTransformationConfig: DataTransformationConfig,
+    ):
+        self.dataIngestionArtifact = dataIngestionArtifact
+        self.dataValidationArtifact = dataValidationArtifact
+        self.dataTransformationConfig = dataTransformationConfig
+        self.dataIngestion = DataIngestion()
 
-        ###  recoding the customer's education level to numeric form (0: high-school, 1: diploma, 2: bachelors, 3: masters, and 4: doctorates)
-        df["Education"] = df["Education"].map({
-            "Basic": 0,
-            "2n Cycle": 1,
-            "Graduation": 2,
-            "Master": 3,
-            "PhD": 4
-        }).astype("int64")
+        self.imputer_config = SimpleImputerConfig()
 
-        ###  recoding the customer's marital status to binary form (1: married or together, 0: others)
-        df["Marital_Status"] = df["Marital_Status"].map({
-            "Married": 1,
-            "Together": 1,
-            "Absurd": 0,
-            "Widow": 0,
-            "YOLO": 0,
-            "Divorced": 0,
-            "Single": 0,
-            "Alone": 0
-        }).astype("int64")
+        self.utils = MainUtils()
 
+    @staticmethod
+    def read_data(file_path: str) -> pd.DataFrame:
+        try:
+            return pd.read_csv(file_path)
+        except Exception as e:
+            raise CustomException(e, sys)
 
-        #  creating a new field to store the number of children in the household
-        df['Children']=df['Kidhome']+df['Teenhome']
+    def get_new_features(self, train_set: DataFrame, test_set: DataFrame) -> DataFrame:
+        try:
+            logging.info("New feature creation started")
+            train_set_with_new_features: DataFrame = DataFrame()
+            test_set_with_new_features: DataFrame = DataFrame()
 
-        #creating Family_Size
-        df['Family_Size']=df['Marital_Status']+df['Children']+1
+            datasets = {"train_set": train_set, "test_set": test_set}
 
-        #  creating a new field to store the total spending of the customer
-        df['Total_Spending']=df["MntWines"]+ df["MntFruits"]+ df["MntMeatProducts"]+ df["MntFishProducts"]+ df["MntSweetProducts"]+ df["MntGoldProds"]
-        df["Total Promo"] =  df["AcceptedCmp1"]+ df["AcceptedCmp2"]+ df["AcceptedCmp3"]+ df["AcceptedCmp4"]+ df["AcceptedCmp5"]
+            for key in datasets:
+                dataset = datasets[key]
+                # create new column for feature
+                ##  creating a new field to store the Age of the customer
+                current_year = datetime.now().year
 
-        ## The following code works out how long the customer has been with the company and store the total number of promotions the customers responded to
-        df['Dt_Customer']=pd.to_datetime(df['Dt_Customer'], format='%d-%m-%Y')
-        today=datetime.today()
-        df['Days_as_Customer']=(today-df['Dt_Customer']).dt.days
-        df['Offers_Responded_To']=df['AcceptedCmp1']+df['AcceptedCmp2']+df['AcceptedCmp3']+df['AcceptedCmp4']+df['AcceptedCmp5']+df['Response']
-        df["Parental Status"] = np.where(df["Children"] > 0, 1, 0)
+                dataset["Age"] = current_year - dataset["Year_Birth"]
 
-        #dropping columns which are already used to create new features
-        columns_to_drop = ['Year_Birth','Kidhome','Teenhome']
-        df.drop(columns = columns_to_drop, axis = 1, inplace=True)
-        df.rename(columns={"Marital_Status": "Marital Status","MntWines": "Wines","MntFruits":"Fruits",
-                        "MntMeatProducts":"Meat","MntFishProducts":"Fish","MntSweetProducts":"Sweets",
-                        "MntGoldProds":"Gold","NumWebPurchases": "Web","NumCatalogPurchases":"Catalog",
-                        "NumStorePurchases":"Store","NumDealsPurchases":"Discount Purchases"},
-                inplace = True)
+                ###  recoding the customer's education level to numeric form (0: high-school, 1: diploma, 2: bachelors, 3: masters, and 4: doctorates)
+                dataset["Education"] = (
+                    dataset["Education"]
+                    .map(
+                        {
+                            "Basic": 0,
+                            "2n Cycle": 1,
+                            "Graduation": 2,
+                            "Master": 3,
+                            "PhD": 4,
+                        }
+                    )
+                    .astype("int64")
+                )
 
-        df = df[["Age","Education","Marital Status","Parental Status","Children","Income","Total_Spending","Days_as_Customer","Recency","Wines","Fruits","Meat","Fish","Sweets","Gold","Web","Catalog","Store","Discount Purchases","Total Promo","NumWebVisitsMonth"]]
-        logging.info("Feature creation completed successfully.")
-        return df
-    except Exception as e:
-        logging.error(f"Error occurred during feature creation: {e}")
-        raise CustomException(e, sys)
-    
+                ###  recoding the customer's marital status to binary form (1: married or together, 0: others)
+                dataset["Marital_Status"] = (
+                    dataset["Marital_Status"]
+                    .map(
+                        {
+                            "Married": 1,
+                            "Together": 1,
+                            "Absurd": 0,
+                            "Widow": 0,
+                            "YOLO": 0,
+                            "Divorced": 0,
+                            "Single": 0,
+                            "Alone": 0,
+                        }
+                    )
+                    .astype("int64")
+                )
 
-# Outlier capping using IQR method
-def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        for feature in df.select_dtypes(include=['int64', 'float64']).columns:
-            Q1 = df[feature].quantile(0.25)
-            Q3 = df[feature].quantile(0.75)
+                #  creating a new field to store the number of children in the household
+                dataset["Children"] = dataset["Kidhome"] + dataset["Teenhome"]
 
-            IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-            df[feature] = df[feature].astype(float)
-            df.loc[df[feature] < lower_bound, feature] = lower_bound
-            df.loc[df[feature] > upper_bound, feature] = upper_bound
+                # creating Family_Size
+                dataset["Family_Size"] = (
+                    dataset["Marital_Status"] + dataset["Children"] + 1
+                )
 
-        logging.info("Outliers handled successfully.")
-        return df
-    except Exception as e:
-        logging.error(f"Error occurred while handling outliers: {e}")
-        raise CustomException(e, sys)
+                #  creating a new field to store the total spending of the customer
+                dataset["Total_Spending"] = (
+                    dataset["MntWines"]
+                    + dataset["MntFruits"]
+                    + dataset["MntMeatProducts"]
+                    + dataset["MntFishProducts"]
+                    + dataset["MntSweetProducts"]
+                    + dataset["MntGoldProds"]
+                )
+                dataset["Total Promo"] = (
+                    dataset["AcceptedCmp1"]
+                    + dataset["AcceptedCmp2"]
+                    + dataset["AcceptedCmp3"]
+                    + dataset["AcceptedCmp4"]
+                    + dataset["AcceptedCmp5"]
+                )
 
+                ## The following code works out how long the customer has been with the company and store the total number of promotions the customers responded to
+                dataset["Dt_Customer"] = pd.to_datetime(
+                    dataset["Dt_Customer"], format="%d-%m-%Y"
+                )
+                today = datetime.today()
+                dataset["Days_as_Customer"] = (today - dataset["Dt_Customer"]).dt.days
+                dataset["Offers_Responded_To"] = (
+                    dataset["AcceptedCmp1"]
+                    + dataset["AcceptedCmp2"]
+                    + dataset["AcceptedCmp3"]
+                    + dataset["AcceptedCmp4"]
+                    + dataset["AcceptedCmp5"]
+                    + dataset["Response"]
+                )
+                dataset["Parental Status"] = np.where(dataset["Children"] > 0, 1, 0)
 
-# Feature Scaling
-def scale_features(df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        numeric_features = [feature for feature in df.columns if df[feature].dtype != 'O']
-        outlier_features = ['Wines', 'Fruits', 'Meat', 'Fish','Sweets', 'Gold', 'Total_Spending', "Age"]
-        numeric_features= [feature for feature in numeric_features if feature not in outlier_features]
+                # dropping columns which are already used to create new features
+                columns_to_drop = ["Year_Birth", "Kidhome", "Teenhome"]
+                dataset.drop(columns=columns_to_drop, axis=1, inplace=True)
+                dataset.rename(
+                    columns={
+                        "Marital_Status": "Marital Status",
+                        "MntWines": "Wines",
+                        "MntFruits": "Fruits",
+                        "MntMeatProducts": "Meat",
+                        "MntFishProducts": "Fish",
+                        "MntSweetProducts": "Sweets",
+                        "MntGoldProds": "Gold",
+                        "NumWebPurchases": "Web",
+                        "NumCatalogPurchases": "Catalog",
+                        "NumStorePurchases": "Store",
+                        "NumDealsPurchases": "Discount Purchases",
+                    },
+                    inplace=True,
+                )
 
-        numeric_pipeline = Pipeline(
-            steps=[
-                ("Imputer", SimpleImputer(strategy="constant", fill_value=0)),
-                ("StandardScaler", StandardScaler()),
-            ])
+                dataset = dataset[
+                    [
+                        "Age",
+                        "Education",
+                        "Marital Status",
+                        "Parental Status",
+                        "Children",
+                        "Income",
+                        "Total_Spending",
+                        "Days_as_Customer",
+                        "Recency",
+                        "Wines",
+                        "Fruits",
+                        "Meat",
+                        "Fish",
+                        "Sweets",
+                        "Gold",
+                        "Web",
+                        "Catalog",
+                        "Store",
+                        "Discount Purchases",
+                        "Total Promo",
+                        "NumWebVisitsMonth",
+                    ]
+                ]
 
-        outlier_features_pipeline = Pipeline(
-            steps=[
-                ("Imputer", SimpleImputer(strategy="constant", fill_value=0)),
-                ("transformer", PowerTransformer(standardize=True)),
-            ])
+                if key == "train_set":
+                    train_set_with_new_features = pd.concat(
+                        [train_set_with_new_features, dataset]
+                    )
+                else:
+                    test_set_with_new_features = pd.concat(
+                        [test_set_with_new_features, dataset]
+                    )
 
-        preprocessor = ColumnTransformer(
-            [
-                ("numeric pipeline", numeric_pipeline, numeric_features),
-                ("outlier feature pipeline", outlier_features_pipeline, outlier_features),
-            ],
-            remainder="passthrough",)
+            logging.info("New feature creation completed successfully.")
 
-        columns = df.columns.tolist()
-        df = preprocessor.fit_transform(df)
-        df = pd.DataFrame(data=df, columns=columns)
-        logging.info("Feature scaling completed successfully.")
-        return df
-    except Exception as e:
-        logging.error(f"Error occurred during feature scaling: {e}")
-        raise CustomException(e, sys)
+        except Exception as e:
+            raise CustomException(e, sys)
 
+    def transform_data(self, train_set: DataFrame, test_set: DataFrame) -> DataFrame:
+        logging.info("Entered transform_data method of DataTransformation class")
+        try:
+            logging.info("Got numerical cols from schema config")
 
-if __name__ == '__main__':
-    df = import_data(file_path)
-    df = transform_data(df)
-    df = featureCreation_data(df)
-    df = handle_outliers(df)
-    df = scale_features(df)
-    
-    processed_file_path = os.getenv("PROCESSED_DATA_LOCATION")
-    os.makedirs(os.path.dirname(processed_file_path), exist_ok=True)
-    save_df(df, processed_file_path)
-    print(f"\n\nData transformation completed and saved to {processed_file_path}.")
+            datasets = {"train_set": train_set, "test_set": test_set}
 
+            for key, df in datasets.items():
+                df.dropna(inplace=True)
+                df.drop_duplicates(inplace=True)
+
+                drop_columns = ["Z_CostContact", "Z_Revenue", "ID", "_id"]
+                for dc in drop_columns:
+                    if dc in df.columns:
+                        df.drop(dc, axis=1, inplace=True)
+
+                datasets[key] = df
+
+            train_set = datasets["train_set"]
+            test_set = datasets["test_set"]
+
+            numeric_features: list = [
+                feature
+                for feature in train_set.columns
+                if train_set[feature].dtype != "O"
+            ]
+
+            outlier_features = [
+                "Wines",
+                "Fruits",
+                "Meat",
+                "Fish",
+                "Sweets",
+                "Gold",
+                "Age",
+                "Total_Spending",
+            ]
+
+            numeric_features = [
+                features
+                for features in numeric_features
+                if features not in outlier_features
+            ]
+
+            logging.info("Initilise StandardScaler and SimpleImputer")
+
+            numeric_pipeline = Pipeline(
+                steps=[
+                    (
+                        "Imputer",
+                        SimpleImputer(
+                            **self.imputer_config.get_simple_imputer_config()
+                        ),
+                    ),
+                    ("StandardScaler", StandardScaler()),
+                ]
+            )
+
+            outlier_feature_pipeline = Pipeline(
+                steps=[
+                    (
+                        "Imputer",
+                        SimpleImputer(
+                            **self.imputer_config.get_simple_imputer_config()
+                        ),
+                    ),
+                    ("Transformer", PowerTransformer(standardize=True)),
+                ]
+            )
+
+            preprocesser = ColumnTransformer(
+                [
+                    ("numeric_pipeline", numeric_pipeline, numeric_features),
+                    ("outlier_pipeline", outlier_feature_pipeline, outlier_features),
+                ]
+            )
+
+            preprocessed_train_set = preprocesser.fit_transform(train_set)
+            preprocessed_test_set = preprocesser.transform(test_set)
+
+            columns = train_set.columns
+            preprocessed_train_set = pd.DataFrame(
+                preprocessed_train_set, columns=columns
+            )
+            preprocessed_test_set = pd.DataFrame(preprocessed_test_set, columns=columns)
+
+            preprocessor_obj_dir = os.path.dirname(
+                self.dataTransformationConfig.transformed_object_file_path
+            )
+            os.makedirs(preprocessor_obj_dir, exist_ok=True)
+
+            self.utils.save_object(
+                preprocesser, self.dataTransformationConfig.transformed_object_file_path
+            )
+
+            logging.info(
+                "Saved preprocessor object at: ",
+                self.dataTransformationConfig.transformed_object_file_path,
+            )
+
+            logging.info("Exited transform_data method of DataTransformation class")
+
+            return preprocessed_train_set, preprocessed_test_set
+
+        except Exception as e:
+            raise CustomException(e, sys)
+
+    def initiate_data_transformation(self):
+        logging.info(
+            "Entered initiate_data_transformation method of DataTransformation class"
+        )
+        try:
+            if self.dataValidationArtifact.validation_status:
+                train_set = DataTransformation.read_data(
+                    self.dataValidationArtifact.valid_train_file_path
+                )
+                test_set = DataTransformation.read_data(
+                    self.dataValidationArtifact.valid_test_file_path
+                )
+
+                train_set, test_set = self.get_new_features(train_set, test_set)
+
+                logging.info("Got the preprocessor object")
+
+                preprocessed_train_set, preprocessed_test_set = self.transform_data(
+                    train_set, test_set
+                )
+
+                cluster_creator = CreateCluster()
+
+                labelled_train_set = cluster_creator.initilize_clustring(
+                    preprocessed_train_set
+                )
+
+                labelled_test_set = cluster_creator.initilize_clustring(
+                    preprocessed_test_set
+                )
+
+                X_train = labelled_train_set.drop(columns=[TARGET_COLUMN], axis=1)
+                y_train = labelled_train_set[TARGET_COLUMN]
+
+                X_test = labelled_test_set.drop(columns=[TARGET_COLUMN], axis=1)
+                y_test = labelled_test_set[TARGET_COLUMN]
+
+                train_arr = np.c_[np.array(X_train), np.array(y_train)]
+
+                test_arr = np.c_[np.array(X_test, y_test)]
+
+                self.utils.save_numpy_array_data(
+                    self.dataTransformationConfig.transformed_train_file_path
+                )
+                self.utils.save_numpy_array_data(
+                    self.dataTransformationConfig.transformed_test_file_path
+                )
+
+                data_transformation_artifact = DataTransformationArtifact(
+                    transformed_object_file_path=self.dataTransformationConfig.transformed_object_file_path,
+                    transformed_train_file_path=self.dataTransformationConfig.transformed_train_file_path,
+                    transformed_test_file_path=self.dataTransformationConfig.transformed_test_file_path,
+                )
+
+                logging.info(
+                    "Exited initiate_data_transformation method of DataTransformation class"
+                )
+                return data_transformation_artifact
+            else:
+                raise Exception("Data validation Failed.")
+
+        except Exception as e:
+            raise CustomException(e, sys)
